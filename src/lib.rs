@@ -70,7 +70,7 @@ impl State {
             #[cfg(not(target_arch = "wasm32"))]
             backends: wgpu::Backends::PRIMARY,
             #[cfg(target_arch = "wasm32")]
-            backends: wgpu::Backends::GL,
+            backends: wgpu::Backends::PRIMARY,
             ..Default::default()
         });
 
@@ -250,7 +250,7 @@ impl State {
                             b: b,
                             a: 1.0,
                         }),
-                        store: wgpu::StoreOp::Discard,
+                        store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
                 })],
@@ -259,13 +259,12 @@ impl State {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
+
             render_pass.set_pipeline(&self.render_pipeline);
 
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            // render_pass.draw(0..self.num_vertices, 0..1);
-
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16); // 1.
-            render_pass.draw_indexed(0..self.num_indices, 0, 0..1); // 2.
+            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
         }
 
         // submit will accept anything that implements IntoIter
