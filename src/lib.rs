@@ -1,5 +1,7 @@
-use std::sync::Arc;
+use std::time::Instant;
+use std::{sync::Arc, time::Duration};
 
+use cgmath::{Angle, Deg, Euler, Matrix, Matrix3, Matrix4, Vector4, Zero};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalPosition,
@@ -47,12 +49,122 @@ const VERTICES: &[Vertex] = &[
 const INDICES: &[u16] = &[0, 1, 4, 1, 2, 4, 2, 3, 4];
 
 #[rustfmt::skip]
-pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_cols(
-    cgmath::Vector4::new(1.0, 0.0, 0.0, 0.0),
-    cgmath::Vector4::new(0.0, 1.0, 0.0, 0.0),
-    cgmath::Vector4::new(0.0, 0.0, 0.5, 0.0),
-    cgmath::Vector4::new(0.0, 0.0, 0.5, 1.0),
+pub const OPENGL_TO_WGPU_MATRIX: Matrix4<f32> = Matrix4::from_cols(
+    Vector4::new(1.0, 0.0, 0.0, 0.0),
+    Vector4::new(0.0, 1.0, 0.0, 0.0),
+    Vector4::new(0.0, 0.0, 0.5, 0.0),
+    Vector4::new(0.0, 0.0, 0.5, 1.0),
 );
+
+// We need this for Rust to store our data correctly for the shaders
+#[repr(C)]
+// This is so we can store this in a buffer
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct Uniforms {
+    // We can't use cgmath with bytemuck directly, so we'll have
+    // to convert the Matrix4 into a 4x4 f32 array
+    view_proj: [[f32; 4]; 4],
+    model_rot: [[f32; 4]; 3],
+}
+
+fn to_wgpu(m_gl: Matrix3<f32>) -> [[f32; 4]; 3] {
+    [
+        [m_gl.x.x, m_gl.x.y, m_gl.x.z, 0.0],
+        [m_gl.y.x, m_gl.y.y, m_gl.y.z, 0.0],
+        [m_gl.z.x, m_gl.z.y, m_gl.z.z, 0.0],
+    ]
+}
+
+impl Uniforms {
+    fn new() -> Self {
+        use cgmath::SquareMatrix;
+        Self {
+            view_proj: Matrix4::identity().into(),
+            model_rot: to_wgpu(Matrix3::identity()),
+        }
+    }
+
+    fn update_view_proj(&mut self, camera: &Camera) {
+        self.view_proj = camera.build_view_projection_matrix().into();
+    }
+
+    fn update_model_rot(&mut self, model: &Model) {
+        self.model_rot = to_wgpu(model.build_rotation_matrix());
+    }
+}
+
+#[derive(Debug)]
+struct Model {
+    rot_speed: f32,
+    rot: Euler<Deg<f32>>,
+}
+
+impl Model {
+    fn new() -> Self {
+        Self {
+            rot_speed: 0.0,
+            rot: Euler::new(Deg::zero(), Deg::zero(), Deg::zero()),
+        }
+    }
+
+    fn build_rotation_matrix(&self) -> Matrix3<f32> {
+        Matrix3::from(self.rot).transpose()
+    }
+}
+
+#[derive(Default)]
+struct ModelController {
+    is_plus_pressed: bool,
+    is_minus_pressed: bool,
+    last_update_time: Duration,
+}
+
+impl ModelController {
+    fn new() -> Self {
+        Self {
+            ..Default::default()
+        }
+    }
+
+    fn handle_key(&mut self, code: KeyCode, is_pressed: bool) -> bool {
+        match code {
+            KeyCode::Digit1 => {
+                self.is_minus_pressed = is_pressed;
+                true
+            }
+            KeyCode::Digit2 => {
+                self.is_plus_pressed = is_pressed;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn update_model(&mut self, model: &mut Model, time: Duration) {
+        let speed_delta = 0.0001;
+
+        if self.is_minus_pressed {
+            model.rot_speed -= speed_delta;
+        }
+        if self.is_plus_pressed {
+            model.rot_speed += speed_delta;
+        }
+
+        let dt = time - self.last_update_time;
+        self.last_update_time = time;
+
+        let ddeg = Deg(dt.as_millis() as f32 * model.rot_speed);
+        model.rot.y = (model.rot.y + ddeg).normalize();
+
+        if !ddeg.is_zero() {
+            log::debug!(
+                "speed:{0} | ddeg: {ddeg:?} | rot:{1:?}",
+                model.rot_speed,
+                model.rot
+            );
+        }
+    }
+}
 
 struct Camera {
     eye: cgmath::Point3<f32>,
@@ -66,32 +178,9 @@ struct Camera {
 
 impl Camera {
     fn build_view_projection_matrix(&self) -> cgmath::Matrix4<f32> {
-        let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
+        let view = Matrix4::look_at_rh(self.eye, self.target, self.up);
         let proj = cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
         return OPENGL_TO_WGPU_MATRIX * proj * view;
-    }
-}
-
-// We need this for Rust to store our data correctly for the shaders
-#[repr(C)]
-// This is so we can store this in a buffer
-#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct CameraUniform {
-    // We can't use cgmath with bytemuck directly, so we'll have
-    // to convert the Matrix4 into a 4x4 f32 array
-    view_proj: [[f32; 4]; 4],
-}
-
-impl CameraUniform {
-    fn new() -> Self {
-        use cgmath::SquareMatrix;
-        Self {
-            view_proj: cgmath::Matrix4::identity().into(),
-        }
-    }
-
-    fn update_view_proj(&mut self, camera: &Camera) {
-        self.view_proj = camera.build_view_projection_matrix().into();
     }
 }
 
@@ -171,6 +260,7 @@ impl CameraController {
 
 // This will store the state of our game
 pub struct State {
+    start_time: Instant,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -184,10 +274,12 @@ pub struct State {
     num_indices: u32,
     diffuse_bind_group: wgpu::BindGroup,
     camera: Camera,
-    camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     camera_controller: CameraController,
+    model: Model,
+    model_controller: ModelController,
+    uniforms: Uniforms,
 }
 
 impl State {
@@ -370,7 +462,7 @@ impl State {
         let camera = Camera {
             // position the camera 1 unit up and 2 units back
             // +z is out of the screen
-            eye: (0.0, 1.0, 2.0).into(),
+            eye: (0.0, 0.0, 3.0).into(),
             // have it look at the origin
             target: (0.0, 0.0, 0.0).into(),
             // which way is "up"
@@ -381,16 +473,19 @@ impl State {
             zfar: 100.0,
         };
 
-        let mut camera_uniform = CameraUniform::new();
-        camera_uniform.update_view_proj(&camera);
+        let model = Model::new();
 
-        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Camera Buffer"),
-            contents: bytemuck::cast_slice(&[camera_uniform]),
+        let mut uniforms = Uniforms::new();
+        uniforms.update_view_proj(&camera);
+        uniforms.update_model_rot(&model);
+
+        let objects_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Objects Buffer"),
+            contents: bytemuck::cast_slice(&[uniforms]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let camera_bind_group_layout =
+        let objects_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -402,22 +497,22 @@ impl State {
                     },
                     count: None,
                 }],
-                label: Some("camera_bind_group_layout"),
+                label: Some("objects_bind_group_layout"),
             });
 
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &camera_bind_group_layout,
+        let objects_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &objects_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: camera_buffer.as_entire_binding(),
+                resource: objects_buffer.as_entire_binding(),
             }],
-            label: Some("camera_bind_group"),
+            label: Some("objects_bind_group"),
         });
 
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&texture_bind_group_layout, &camera_bind_group_layout],
+                bind_group_layouts: &[&texture_bind_group_layout, &objects_bind_group_layout],
                 immediate_size: 0,
             });
 
@@ -444,7 +539,7 @@ impl State {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: None, // Some(wgpu::Face::Back),
                 // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
                 polygon_mode: wgpu::PolygonMode::Fill,
                 // Requires Features::DEPTH_CLIP_CONTROL
@@ -475,8 +570,10 @@ impl State {
         });
 
         let camera_controller = CameraController::new(0.001);
+        let model_controller = ModelController::new();
 
         Ok(Self {
+            start_time: Instant::now(),
             surface,
             device,
             queue,
@@ -490,10 +587,12 @@ impl State {
             num_indices: INDICES.len() as u32,
             diffuse_bind_group,
             camera,
-            camera_uniform,
-            camera_buffer,
-            camera_bind_group,
+            camera_buffer: objects_buffer,
+            camera_bind_group: objects_bind_group,
             camera_controller,
+            model,
+            model_controller,
+            uniforms,
         })
     }
 
@@ -522,6 +621,8 @@ impl State {
 
         let r = self.mouse_position.x / output.texture.height() as f64;
         let g = self.mouse_position.y / output.texture.width() as f64;
+        let b = 0.0;
+        let a = 1.0;
 
         let mut encoder = self
             .device
@@ -536,12 +637,7 @@ impl State {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: r,
-                            g: g,
-                            b: (r + g) / 2.0,
-                            a: 0.1,
-                        }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a }),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -583,6 +679,7 @@ impl State {
             }
             _ => {
                 self.camera_controller.handle_key(code, is_pressed);
+                self.model_controller.handle_key(code, is_pressed);
             }
         }
     }
@@ -593,11 +690,16 @@ impl State {
 
     fn update(&mut self) {
         self.camera_controller.update_camera(&mut self.camera);
-        self.camera_uniform.update_view_proj(&self.camera);
+        self.uniforms.update_view_proj(&self.camera);
+
+        self.model_controller
+            .update_model(&mut self.model, self.start_time.elapsed());
+        self.uniforms.update_model_rot(&self.model);
+
         self.queue.write_buffer(
             &self.camera_buffer,
             0,
-            bytemuck::cast_slice(&[self.camera_uniform]),
+            bytemuck::cast_slice(&[self.uniforms]),
         );
     }
 }
