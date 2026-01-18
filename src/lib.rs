@@ -141,7 +141,7 @@ impl ModelController {
     }
 
     fn update_model(&mut self, model: &mut Model, time: Duration) {
-        let speed_delta = 0.0001;
+        let speed_delta = 0.0000001;
 
         if self.is_minus_pressed {
             model.rot_speed -= speed_delta;
@@ -153,16 +153,14 @@ impl ModelController {
         let dt = time - self.last_update_time;
         self.last_update_time = time;
 
-        let ddeg = Deg(dt.as_millis() as f32 * model.rot_speed);
+        let ddeg = Deg(dt.as_micros() as f32 * model.rot_speed);
         model.rot.y = (model.rot.y + ddeg).normalize();
 
-        if !ddeg.is_zero() {
-            log::debug!(
-                "speed:{0} | ddeg: {ddeg:?} | rot:{1:?}",
-                model.rot_speed,
-                model.rot
-            );
-        }
+        log::debug!(
+            "dt: {dt:?} | speed:{0} | ddeg: {ddeg:?} | rot:{1:?}",
+            model.rot_speed,
+            model.rot
+        );
     }
 }
 
